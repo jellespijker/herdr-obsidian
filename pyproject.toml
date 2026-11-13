@@ -1,0 +1,29 @@
+# Development tooling only. At runtime the plugin requires only Python 3.11+
+# standard library plus optional `herdr` / `herdr-app` / `hc` CLIs.
+
+[project]
+name = "herdr-obsidian"
+version = "0.1.0"
+description = "Herdr-App GPUI mod & TUI plugin: integrated Obsidian Vault reader, editor, [[wikilink]] resolver, backlinks, Squarified DiskTree treemap, JSON Canvas (.canvas) viewer, 2D Knowledge Graph, and herdr-kanban Linked-Knowledge sync."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 110
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM"]
+ignore = ["SIM105", "SIM108"]

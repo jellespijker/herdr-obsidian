@@ -1,0 +1,121 @@
+# herdr-plugin.toml — manifest for herdr-obsidian.
+#
+# Integrated Obsidian Vault reader, editor, [[wikilink]] resolver, backlinks,
+# Squarified DiskTree treemap, JSON Canvas (.canvas) viewer, 2D Knowledge Graph,
+# and herdr-kanban Linked-Knowledge sync for Herdr-App (GPUI) and the herdr TUI.
+
+id = "herdr-obsidian"
+name = "Obsidian Vault"
+version = "0.1.0"
+description = "Integrated Obsidian Vault reader, editor, [[wikilink]] navigation, backlinks, Squarified DiskTree treemap, JSON Canvas (.canvas) viewer, 2D Knowledge Graph, and Kanban Linked-Knowledge sync."
+min_herdr_version = "0.9.3"
+platforms = ["linux", "macos"]
+
+[[build]]
+command = ["sh", "scripts/build.sh"]
+
+[[actions]]
+id = "open"
+title = "Obsidian: open vault beside this pane"
+contexts = ["workspace", "pane", "global"]
+command = ["bin/herdr-obsidian", "open"]
+
+[[actions]]
+id = "open-tab"
+title = "Obsidian: open vault in a full tab"
+contexts = ["workspace", "pane", "global"]
+command = ["bin/herdr-obsidian", "open", "--placement", "tab"]
+
+[[actions]]
+id = "open-popup"
+title = "Obsidian: open quick popup vault"
+contexts = ["workspace", "pane", "global"]
+command = ["bin/herdr-obsidian", "popup", "vault-popup"]
+
+[[actions]]
+id = "open-treemap"
+title = "Obsidian: open DiskTree Squarified Treemap"
+contexts = ["workspace", "pane", "global"]
+command = ["bin/herdr-obsidian", "open", "--view", "treemap"]
+
+[[actions]]
+id = "open-canvas"
+title = "Obsidian: open JSON Canvas (.canvas) viewer"
+contexts = ["workspace", "pane", "global"]
+command = ["bin/herdr-obsidian", "open", "--view", "canvas"]
+
+[[actions]]
+id = "open-graph"
+title = "Obsidian: open 2D Knowledge Graph"
+contexts = ["workspace", "pane", "global"]
+command = ["bin/herdr-obsidian", "open", "--view", "graph"]
+
+[[actions]]
+id = "open-ticket"
+title = "Obsidian: open active Kanban ticket Linked-Knowledge Brief"
+contexts = ["workspace", "pane", "global"]
+command = ["bin/herdr-obsidian", "open", "--view", "ticket"]
+
+[[actions]]
+id = "install-app-mod"
+title = "Obsidian: install Herdr-App GPUI mod"
+contexts = ["workspace", "global"]
+command = ["bin/herdr-obsidian", "install-app-mod", "--notify"]
+
+[[actions]]
+id = "install-skill"
+title = "Obsidian: install skill and CLI for all agents"
+contexts = ["workspace", "global"]
+command = ["bin/herdr-obsidian", "install-skill", "--notify"]
+
+[[actions]]
+id = "uninstall-skill"
+title = "Obsidian: remove skill and CLI links"
+contexts = ["workspace", "global"]
+command = ["bin/herdr-obsidian", "install-skill", "--uninstall", "--notify"]
+
+[[actions]]
+id = "setup-keys"
+title = "Obsidian: add keybinding (Ctrl+Shift+O / prefix+u opens the vault)"
+contexts = ["workspace", "global"]
+command = ["bin/herdr-obsidian", "setup-keys", "--notify"]
+
+[[actions]]
+id = "remove-keys"
+title = "Obsidian: remove keybinding"
+contexts = ["workspace", "global"]
+command = ["bin/herdr-obsidian", "setup-keys", "--remove", "--notify"]
+
+[[actions]]
+id = "doctor"
+title = "Obsidian: check setup"
+contexts = ["workspace", "global"]
+command = ["bin/herdr-obsidian", "popup", "doctor"]
+
+[[panes]]
+id = "vault"
+title = "Obsidian"
+placement = "tab"
+command = ["bin/herdr-obsidian", "tui"]
+
+[[panes]]
+id = "vault-split"
+title = "Obsidian"
+placement = "split"
+command = ["bin/herdr-obsidian", "tui", "--compact"]
+
+[[panes]]
+id = "vault-popup"
+title = "Obsidian"
+placement = "popup"
+width = "90%"
+height = "85%"
+command = ["bin/herdr-obsidian", "tui"]
+
+[[panes]]
+id = "doctor"
+title = "Obsidian: doctor"
+placement = "popup"
+width = 100
+height = "80%"
+command = ["bin/herdr-obsidian", "doctor", "--wait"]

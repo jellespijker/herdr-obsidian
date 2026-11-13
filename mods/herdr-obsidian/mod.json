@@ -1,0 +1,12 @@
+{
+  "place": "none",
+  "size": 740,
+  "title": "Obsidian Vault",
+  "focusable": true,
+  "overlay": {
+    "kind": "window",
+    "width": 1200,
+    "height": 780,
+    "key": "herdr-obsidian"
+  }
+}
