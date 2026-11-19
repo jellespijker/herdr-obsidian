@@ -23,7 +23,13 @@ from .ticket_sync import (
     write_spool_state,
 )
 from .treemap import CATEGORY_SPECS, build_knowledge_graph, build_treemap
-from .vault import VaultIndex, diagram_cache_dir, discover_vault, extract_png_dimensions
+from .vault import (
+    VaultIndex,
+    diagram_cache_dir,
+    discover_vault,
+    extract_png_dimensions,
+    find_vault_root,
+)
 
 
 def _notify_herdr(message: str, *, level: str = "info") -> None:
@@ -53,17 +59,11 @@ def _notify_herdr(message: str, *, level: str = "info") -> None:
 
 
 def _trigger_herdr_app_refresh() -> None:
-    herdr_app = shutil.which("herdr-app")
-    if not herdr_app:
-        return
-    try:
-        subprocess.run(
-            [herdr_app, "do", "herdr-obsidian.refresh"],
-            capture_output=True,
-            timeout=2,
-        )
-    except (OSError, subprocess.SubprocessError):
-        pass
+    # Spool updates in ~/.local/state/herdr-obsidian/spool.json are watched
+    # directly by the herdr-obsidian GPUI mod via watchFolder(); calling
+    # `herdr-app do herdr-obsidian.refresh` when the mod pane is hidden triggers
+    # an "unknown command 'herdr-obsidian.refresh'" error toast in herdr-app.
+    return
 
 
 def _detect_terminal_marker(pane: str | None) -> str | None:
@@ -160,10 +160,47 @@ def _ensure_local_asset_cache(index: VaultIndex, note_payload: dict[str, Any] | 
 
 def cmd_app_state(args: argparse.Namespace) -> int:
     cwd = Path(args.cwd or os.getcwd()).expanduser().resolve()
-    vault_root = discover_vault(cwd, args.vault)
+    vault_root = find_vault_root(cwd, args.vault)
+    spool = read_spool_state()
+    if vault_root is None:
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "has_vault": False,
+                    "version": __version__,
+                    "vault_root": None,
+                    "vault_name": None,
+                    "cwd": str(cwd),
+                    "spool_dir": str(state_dir()),
+                    "spool_seq": int(spool.get("seq", 0)),
+                    "spool_view": spool.get("view"),
+                    "spool_ticket": spool.get("ticket"),
+                    "spool": spool,
+                    "marker_target": None,
+                    "stats": {
+                        "total_notes": 0,
+                        "total_canvases": 0,
+                        "total_assets": 0,
+                        "total_links": 0,
+                    },
+                    "categories": CATEGORY_SPECS,
+                    "bookmarks": [],
+                    "tree": [],
+                    "canvases": [],
+                    "active_note": None,
+                    "search_results": [],
+                    "treemap": {"rects": [], "folders": []},
+                    "graph": {"nodes": [], "edges": []},
+                    "canvas": None,
+                    "ticket_brief": None,
+                }
+            )
+        )
+        return 0
+
     index = VaultIndex(vault_root)
 
-    spool = read_spool_state()
     spool_seq = int(spool.get("seq", 0))
     known_seq = int(getattr(args, "spool_seq", 0) or 0)
     spool_updated = bool(args.follow_sync and spool_seq > known_seq)
@@ -221,6 +258,7 @@ def cmd_app_state(args: argparse.Namespace) -> int:
 
     payload = {
         "ok": True,
+        "has_vault": True,
         "version": __version__,
         "vault_root": str(vault_root),
         "vault_name": f"{vault_root.parent.name}/{vault_root.name}"

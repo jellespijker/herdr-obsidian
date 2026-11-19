@@ -8,6 +8,7 @@ esac
 
 chmod +x bin/herdr-obsidian
 python3 bin/herdr-obsidian install-skill --refresh || true
+python3 bin/herdr-obsidian install-app-mod || true
 
 echo "herdr-obsidian installed. Checking this machine:"
 python3 bin/herdr-obsidian doctor --brief || true

@@ -190,8 +190,11 @@ def infer_level(relpath: str, tags: list[str], fm: dict[str, Any]) -> int | None
     return None
 
 
-def discover_vault(start_dir: Path | str | None = None, explicit_vault: Path | str | None = None) -> Path:
-    """Discover the Obsidian Vault root directory from a workspace, repo, or herdr-kanban worktree."""
+def find_vault_root(
+    start_dir: Path | str | None = None,
+    explicit_vault: Path | str | None = None,
+) -> Path | None:
+    """Return the Obsidian Vault root directory if `start_dir` belongs to a vault, else `None`."""
     if explicit_vault:
         cand = Path(explicit_vault).expanduser().resolve()
         if (cand / ".obsidian").is_dir():
@@ -225,8 +228,15 @@ def discover_vault(start_dir: Path | str | None = None, explicit_vault: Path | s
     if cwd.is_file():
         cwd = cwd.parent
 
+    home_dir = Path.home().resolve()
+    stop_dirs = {Path("/"), Path("/home"), Path("/Users")}
+
     # Walk cwd and ancestors
     for directory in [cwd, *cwd.parents]:
+        if directory in stop_dirs:
+            break
+        if directory == home_dir and cwd != home_dir:
+            break
         if (directory / ".obsidian").is_dir():
             return directory
         if (directory / "docs" / ".obsidian").is_dir():
@@ -254,14 +264,38 @@ def discover_vault(start_dir: Path | str | None = None, explicit_vault: Path | s
             common_git = (cwd / proc.stdout.strip()).resolve()
             main_repo = common_git.parent
             for candidate in [main_repo, main_repo.parent]:
+                if candidate in stop_dirs or candidate == home_dir:
+                    continue
                 if (candidate / "docs" / ".obsidian").is_dir():
                     return (candidate / "docs").resolve()
                 if (candidate / ".obsidian").is_dir():
                     return candidate.resolve()
+                for umbrella_ptr in sorted(candidate.glob(".*umbrella*.json")):
+                    if umbrella_ptr.is_file():
+                        try:
+                            data = json.loads(umbrella_ptr.read_text(encoding="utf-8"))
+                            vault_str = data.get("obsidian_vault")
+                            if vault_str and Path(vault_str).is_dir():
+                                return Path(vault_str).resolve()
+                        except (OSError, json.JSONDecodeError):
+                            pass
     except (OSError, subprocess.SubprocessError):
         pass
 
-    # Fallback: check for docs/ with markdown files, or known recent vault in spool
+    return None
+
+
+def discover_vault(start_dir: Path | str | None = None, explicit_vault: Path | str | None = None) -> Path:
+    """Discover the Obsidian Vault root directory from a workspace, repo, or herdr-kanban worktree."""
+    found = find_vault_root(start_dir, explicit_vault)
+    if found is not None:
+        return found
+
+    cwd = Path(start_dir or os.getcwd()).expanduser().resolve()
+    if cwd.is_file():
+        cwd = cwd.parent
+
+    # Fallback: check for docs/ with markdown files
     for directory in [cwd, *cwd.parents]:
         if (
             directory != Path.home()
@@ -270,20 +304,21 @@ def discover_vault(start_dir: Path | str | None = None, explicit_vault: Path | s
         ):
             return directory / "docs"
 
-    # If start_dir is $HOME, check spool for the last active vault_root
-    spool_file = (
-        Path(os.environ.get("XDG_STATE_HOME") or (Path.home() / ".local" / "state"))
-        / "herdr-obsidian"
-        / "spool.json"
-    )
-    if spool_file.is_file():
-        try:
-            sp = json.loads(spool_file.read_text(encoding="utf-8"))
-            v_root = sp.get("vault_root")
-            if v_root and Path(v_root).is_dir():
-                return Path(v_root).resolve()
-        except (OSError, json.JSONDecodeError):
-            pass
+    # Only when start_dir was not explicitly scoped to a non-home workspace, check spool
+    if start_dir is None or cwd == Path.home().resolve():
+        spool_file = (
+            Path(os.environ.get("XDG_STATE_HOME") or (Path.home() / ".local" / "state"))
+            / "herdr-obsidian"
+            / "spool.json"
+        )
+        if spool_file.is_file():
+            try:
+                sp = json.loads(spool_file.read_text(encoding="utf-8"))
+                v_root = sp.get("vault_root")
+                if v_root and Path(v_root).is_dir():
+                    return Path(v_root).resolve()
+            except (OSError, json.JSONDecodeError):
+                pass
 
     return cwd
 

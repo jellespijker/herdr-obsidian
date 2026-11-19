@@ -129,13 +129,25 @@ function resolveWorkspaceTarget(lastTarget) {
   const activeSpace = allSpaces.find((s) => s.active) || allSpaces[0] || null;
   const spaceTabIds = new Set((activeSpace?.tabs || []).map((tb) => tb.id));
   const spacePanes = allPanes.filter((pn) => spaceTabIds.has(pn.tab));
-  const activeTab = f?.tab || activeSpace?.tabs?.find((tb) => tb.active)?.id || null;
-  const focusedTermPane = f?.pane
-    ? spacePanes.find((pn) => pn.pane === f.pane && pn.terminal)
-    : null;
-  const tabTermPane = activeTab
-    ? spacePanes.find((pn) => pn.tab === activeTab && pn.terminal && pn.cwd)
-    : null;
+  const focusedInSpace = Boolean(activeSpace && f?.space === activeSpace.id);
+  const activeTab =
+    (focusedInSpace && f?.tab && spaceTabIds.has(f.tab) ? f.tab : null) ||
+    activeSpace?.tabs?.find((tb) => tb.active)?.id ||
+    null;
+  const focusedTermPane =
+    focusedInSpace && f?.pane
+      ? spacePanes.find((pn) => pn.pane === f.pane && pn.terminal)
+      : null;
+  const activeTabPanes = activeTab
+    ? spacePanes.filter((pn) => pn.tab === activeTab && pn.terminal && pn.cwd)
+    : [];
+  const tabTermPane =
+    activeTabPanes.find(
+      (pn) =>
+        !/^\/home\/[^/]+\/?$/.test(pn.cwd) && !/^\/Users\/[^/]+\/?$/.test(pn.cwd)
+    ) ||
+    activeTabPanes[0] ||
+    null;
   const spaceTermPaneWithCwd =
     spacePanes.find(
       (pn) =>
@@ -146,8 +158,8 @@ function resolveWorkspaceTarget(lastTarget) {
     ) ||
     spacePanes.find((pn) => pn.terminal && pn.cwd) ||
     null;
-  const focusedInSpaceCwd = activeSpace && f?.space === activeSpace.id ? f.cwd : null;
-  const focusedInSpaceTerm = activeSpace && f?.space === activeSpace.id ? f.terminal : null;
+  const focusedInSpaceCwd = focusedInSpace ? f.cwd : null;
+  const focusedInSpaceTerm = focusedInSpace ? f.terminal : null;
 
   const on =
     p.on ||
@@ -158,24 +170,30 @@ function resolveWorkspaceTarget(lastTarget) {
       : null) ||
     null;
 
+  const sameSpaceLastCwd =
+    lastTarget && lastTarget.spaceId === activeSpace?.id ? lastTarget.cwd : null;
+
   const cwd =
     p.cwd ||
     p.folder ||
     focusedTermPane?.cwd ||
-    focusedInSpaceCwd ||
     tabTermPane?.cwd ||
+    focusedInSpaceCwd ||
     spaceTermPaneWithCwd?.cwd ||
-    activeSpace?.folder ||
-    lastTarget?.cwd ||
+    (activeSpace?.name === "~" ? home() : activeSpace?.folder) ||
+    sameSpaceLastCwd ||
     home() ||
     null;
 
+  const sameSpaceLastPane =
+    lastTarget && lastTarget.spaceId === activeSpace?.id ? lastTarget.pane : null;
+
   const rawPane =
     focusedTermPane?.terminal ||
-    focusedInSpaceTerm ||
     tabTermPane?.terminal ||
+    focusedInSpaceTerm ||
     spaceTermPaneWithCwd?.terminal ||
-    lastTarget?.pane ||
+    sameSpaceLastPane ||
     null;
   const pane = rawPane && String(rawPane).includes("/") ? String(rawPane).split("/")[1] : rawPane;
 
@@ -193,9 +211,12 @@ export default class ObsidianVault extends View {
     this.handle = cx.focus_handle();
     this.size = { width: 860, height: 680 };
     this.lastTarget = null;
+    this.lastTargetKey = "";
     this.lastLocalCwd = null;
     this.state = null;
     this.loading = false;
+    this.loadingTargetKey = "";
+    this.refreshSeq = 0;
     this.pendingRefresh = null;
     this.error = null;
 
@@ -463,14 +484,17 @@ export default class ObsidianVault extends View {
     if (navUpdated) {
       cx.notify();
     }
-    if (this.loading) {
+    const target = resolveWorkspaceTarget(this.lastTarget);
+    const targetKey = `${target.on || "local"}:${target.spaceId || ""}:${target.cwd || ""}`;
+    this.lastTargetKey = targetKey;
+
+    if (this.loading && this.loadingTargetKey === targetKey && !opts.forceSync && !navUpdated) {
       this.pendingRefresh = {
         background: Boolean(opts.background && (this.pendingRefresh?.background ?? true)),
         forceSync: Boolean(opts.forceSync || navUpdated || this.pendingRefresh?.forceSync),
       };
       return;
     }
-    const target = resolveWorkspaceTarget(this.lastTarget);
     if (target.cwd) {
       this.lastTarget = target;
       if (!target.on) {
@@ -480,6 +504,8 @@ export default class ObsidianVault extends View {
     if (!target.cwd) return;
 
     this.loading = true;
+    this.loadingTargetKey = targetKey;
+    const reqSeq = ++this.refreshSeq;
     const sidebarW = this.sidebarOpen ? 216 : 0;
     const inspectorW = this.inspectorOpen && this.viewMode === "note" ? 216 : 0;
     const availW = Math.max(360, Math.round((this.size?.width || 860) - sidebarW - inspectorW - 20));
@@ -515,41 +541,40 @@ export default class ObsidianVault extends View {
 
     cx.spawn(async (cx) => {
       try {
-        let effectiveTarget = target;
-        let res = await exec("herdr-obsidian", buildArgs(target.cwd, target.pane), {
+        const res = await exec("herdr-obsidian", buildArgs(target.cwd, target.pane), {
           cwd: target.cwd,
           on: target.on,
         }).catch((e) => ({ code: 127, stdout: "", stderr: String(e) }));
 
-        // If the active space is on a remote peer where herdr-obsidian is not installed,
-        // transparently fall back to the local Obsidian Vault instead of failing.
-        if (res.code !== 0 && target.on) {
-          const fallbackCwd =
-            this.lastLocalCwd ||
-            (this.state?.vault_root ? String(this.state.vault_root) : null) ||
-            home();
-          if (fallbackCwd) {
-            effectiveTarget = {
-              ...target,
-              cwd: fallbackCwd,
-              on: null,
-              pane: null,
-            };
-            res = await exec("herdr-obsidian", buildArgs(fallbackCwd, null), {
-              cwd: fallbackCwd,
-              on: null,
-            }).catch((e) => ({ code: 1, stdout: "", stderr: String(e) }));
-          }
-        }
+        if (reqSeq !== this.refreshSeq) return;
 
         if (res.code !== 0) {
-          this.error = res.stderr?.trim() || "herdr-obsidian app-state failed";
+          this.state = {
+            ok: true,
+            has_vault: false,
+            vault_root: null,
+            vault_name: null,
+            cwd: target.cwd,
+            stats: { total_notes: 0, total_canvases: 0, total_assets: 0, total_links: 0 },
+            bookmarks: [],
+            tree: [],
+            canvases: [],
+            active_note: null,
+            search_results: [],
+          };
+          this.error = null;
           return;
         }
         const data = JSON.parse(res.stdout);
         const prevVaultRoot = this.state?.vault_root;
         this.state = data;
         this.error = null;
+
+        if (data.has_vault === false || !data.vault_root) {
+          this.activeNotePath = null;
+          this.activeCanvasPath = null;
+          return;
+        }
 
         if (prevVaultRoot && data.vault_root && prevVaultRoot !== data.vault_root) {
           this.activeNotePath = data.active_note?.relpath || null;
@@ -584,7 +609,7 @@ export default class ObsidianVault extends View {
           this.historyIndex = 0;
         }
 
-        await this.ensureAllAssets(data, effectiveTarget, cx);
+        await this.ensureAllAssets(data, target, cx);
 
         if (this.editMode && data.active_note && this.editorNotePath !== data.active_note.relpath) {
           this.setupEditorForNote(data.active_note);
@@ -593,14 +618,16 @@ export default class ObsidianVault extends View {
         if (data.spool_dir) this.watchDirectory(data.spool_dir, "watchedSpool", cx);
         if (data.vault_root) this.watchDirectory(data.vault_root, "watchedVault", cx);
       } catch (e) {
-        if (!opts.background) this.error = String(e);
+        if (reqSeq === this.refreshSeq && !opts.background) this.error = String(e);
       } finally {
-        this.loading = false;
-        cx.notify();
-        if (this.pendingRefresh) {
-          const nextOpts = this.pendingRefresh;
-          this.pendingRefresh = null;
-          this.refresh(cx, nextOpts);
+        if (reqSeq === this.refreshSeq) {
+          this.loading = false;
+          cx.notify();
+          if (this.pendingRefresh) {
+            const nextOpts = this.pendingRefresh;
+            this.pendingRefresh = null;
+            this.refresh(cx, nextOpts);
+          }
         }
       }
     });
@@ -3204,11 +3231,31 @@ export default class ObsidianVault extends View {
       );
   }
 
-  render(_cx) {
+  render(cx) {
     const t = theme();
     if (this.isLightbox) {
       return this.renderLightbox(t);
     }
+    if (!checking()) {
+      const navUpdated = this.consumeSharedNav();
+      const curTarget = resolveWorkspaceTarget(this.lastTarget);
+      const curTargetKey = `${curTarget.on || "local"}:${curTarget.spaceId || ""}:${curTarget.cwd || ""}`;
+      if (curTargetKey !== this.lastTargetKey || navUpdated) {
+        if (
+          this.lastTarget?.spaceId &&
+          curTarget.spaceId &&
+          this.lastTarget.spaceId !== curTarget.spaceId &&
+          !navUpdated
+        ) {
+          this.activeNotePath = null;
+          this.activeCanvasPath = null;
+          this.activeTicket = null;
+        }
+        this.lastTargetKey = curTargetKey;
+        this.refresh(cx, { forceSync: navUpdated });
+      }
+    }
+    const noVault = Boolean(this.state && this.state.has_vault === false);
     return v_flex()
       .id("root")
       .size_full()
@@ -3243,19 +3290,45 @@ export default class ObsidianVault extends View {
             .child(String(this.error || ""))
         )
       )
-      .child(
-        h_flex()
-          .flex_1()
-          .w_full()
-          .h_full()
-          .min_w(0)
-          .min_h(0)
-          .when(Boolean(this.sidebarOpen), (el) => el.child(this.renderLeftSidebar(t)))
-          .when(this.viewMode === "note", (el) => el.child(this.renderNoteView(t)))
-          .when(this.viewMode === "treemap", (el) => el.child(this.renderTreemapView(t)))
-          .when(this.viewMode === "graph", (el) => el.child(this.renderGraphView(t)))
-          .when(this.viewMode === "canvas", (el) => el.child(this.renderCanvasView(t)))
-          .when(this.viewMode === "ticket", (el) => el.child(this.renderTicketBriefView(t)))
+      .when(noVault, (el) =>
+        el.child(
+          v_flex()
+            .flex_1()
+            .w_full()
+            .h_full()
+            .items_center()
+            .justify_center()
+            .gap(6)
+            .child(
+              div()
+                .text_size(12.5)
+                .font_medium()
+                .text_color(t.muted)
+                .child("No Obsidian Vault in this space")
+            )
+            .child(
+              div()
+                .text_size(11)
+                .text_color(t.dim)
+                .child("Switch to a workspace with an .obsidian or docs/.obsidian directory")
+            )
+        )
+      )
+      .when(!noVault, (el) =>
+        el.child(
+          h_flex()
+            .flex_1()
+            .w_full()
+            .h_full()
+            .min_w(0)
+            .min_h(0)
+            .when(Boolean(this.sidebarOpen), (el) => el.child(this.renderLeftSidebar(t)))
+            .when(this.viewMode === "note", (el) => el.child(this.renderNoteView(t)))
+            .when(this.viewMode === "treemap", (el) => el.child(this.renderTreemapView(t)))
+            .when(this.viewMode === "graph", (el) => el.child(this.renderGraphView(t)))
+            .when(this.viewMode === "canvas", (el) => el.child(this.renderCanvasView(t)))
+            .when(this.viewMode === "ticket", (el) => el.child(this.renderTicketBriefView(t)))
+        )
       );
   }
 }

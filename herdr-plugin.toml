@@ -6,7 +6,7 @@
 
 id = "herdr-obsidian"
 name = "Obsidian Vault"
-version = "0.1.1"
+version = "0.1.2"
 description = "Integrated Obsidian Vault reader, editor, [[wikilink]] navigation, backlinks, Squarified DiskTree treemap, JSON Canvas (.canvas) viewer, 2D Knowledge Graph, and Kanban Linked-Knowledge sync."
 min_herdr_version = "0.9.3"
 platforms = ["linux", "macos"]
