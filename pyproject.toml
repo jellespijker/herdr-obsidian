@@ -3,7 +3,7 @@
 
 [project]
 name = "herdr-obsidian"
-version = "0.1.0"
+version = "0.1.1"
 description = "Herdr-App GPUI mod & TUI plugin: integrated Obsidian Vault reader, editor, [[wikilink]] resolver, backlinks, Squarified DiskTree treemap, JSON Canvas (.canvas) viewer, 2D Knowledge Graph, and herdr-kanban Linked-Knowledge sync."
 readme = "README.md"
 license = "MIT"

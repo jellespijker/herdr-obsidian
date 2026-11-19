@@ -261,3 +261,31 @@ def test_latex_math_rendering_and_markdown_escape() -> None:
     assert r"[τ\_sync(k), τ\_raft(k)]" in rendered
     assert "`code $not_math$`" in rendered
 
+
+def test_spool_ticket_and_initial_follow_sync(tmp_path: Path, monkeypatch, capsys) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    vault_dir = tmp_path / "vault"
+    (vault_dir / ".obsidian").mkdir(parents=True)
+    (vault_dir / "00-Map-Of-Content (MOC)").mkdir(parents=True)
+    (vault_dir / "00-Map-Of-Content (MOC)" / "00 - Home MOC.md").write_text(
+        "# Home MOC\nBody text.\n",
+        encoding="utf-8",
+    )
+
+    rc_open = cli.main(
+        ["open", "--view", "ticket", "--no-window", "--json", "--vault", str(vault_dir), "unimotion#202"]
+    )
+    assert rc_open == 0
+    open_out = json.loads(capsys.readouterr().out)
+    assert open_out["view"] == "ticket"
+    assert open_out["ticket"] == "unimotion#202"
+
+    # Initial app-state with known_seq == 0 and --follow-sync should honor the spool state
+    rc_state = cli.main(["app-state", "--vault", str(vault_dir), "--follow-sync"])
+    assert rc_state == 0
+    state_out = json.loads(capsys.readouterr().out)
+    assert state_out["spool_view"] == "ticket"
+    assert state_out["spool_ticket"] == "unimotion#202"
+    assert state_out["ticket_brief"]["ticket_id"] == "unimotion#202"
+
+

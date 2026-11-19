@@ -27,23 +27,43 @@ from .vault import VaultIndex, diagram_cache_dir, discover_vault, extract_png_di
 
 
 def _notify_herdr(message: str, *, level: str = "info") -> None:
+    if os.environ.get("HERDR_ENV") == "1":
+        herdr_bin = shutil.which("herdr")
+        if herdr_bin:
+            try:
+                subprocess.run(
+                    [herdr_bin, "display-message", f"Obsidian Vault: {message}"],
+                    capture_output=True,
+                    timeout=2,
+                )
+                return
+            except (OSError, subprocess.SubprocessError):
+                pass
+    notify_send = shutil.which("notify-send")
+    if notify_send:
+        urgency = "critical" if level == "error" else "normal"
+        try:
+            subprocess.run(
+                [notify_send, "-u", urgency, "Obsidian Vault", message],
+                capture_output=True,
+                timeout=2,
+            )
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+
+def _trigger_herdr_app_refresh() -> None:
     herdr_app = shutil.which("herdr-app")
-    if herdr_app:
+    if not herdr_app:
+        return
+    try:
         subprocess.run(
-            [
-                herdr_app,
-                "do",
-                "app.notify",
-                "--title",
-                "Obsidian Vault",
-                "--body",
-                message,
-                "--level",
-                level,
-            ],
+            [herdr_app, "do", "herdr-obsidian.refresh"],
             capture_output=True,
-            timeout=3,
+            timeout=2,
         )
+    except (OSError, subprocess.SubprocessError):
+        pass
 
 
 def _detect_terminal_marker(pane: str | None) -> str | None:
@@ -146,7 +166,7 @@ def cmd_app_state(args: argparse.Namespace) -> int:
     spool = read_spool_state()
     spool_seq = int(spool.get("seq", 0))
     known_seq = int(getattr(args, "spool_seq", 0) or 0)
-    spool_updated = bool(args.follow_sync and spool_seq > known_seq and known_seq > 0)
+    spool_updated = bool(args.follow_sync and spool_seq > known_seq)
     marker_target = _detect_terminal_marker(args.pane) if args.follow_sync else None
 
     requested_note = None if spool_updated else args.note
@@ -192,7 +212,12 @@ def cmd_app_state(args: argparse.Namespace) -> int:
     canvas_target = (spool.get("canvas") if spool_updated else args.canvas) or spool.get("canvas")
     canvas_data = index.load_canvas(canvas_target)
 
-    ticket_brief = resolve_ticket_brief(index, cwd, args.ticket)
+    active_ticket = (
+        (spool.get("ticket") if spool_updated else args.ticket)
+        or args.ticket
+        or spool.get("ticket")
+    )
+    ticket_brief = resolve_ticket_brief(index, cwd, active_ticket)
 
     payload = {
         "ok": True,
@@ -204,6 +229,7 @@ def cmd_app_state(args: argparse.Namespace) -> int:
         "spool_dir": str(state_dir()),
         "spool_seq": int(spool.get("seq", 0)),
         "spool_view": spool.get("view"),
+        "spool_ticket": spool.get("ticket"),
         "spool": spool,
         "marker_target": marker_target,
         "stats": {
@@ -362,10 +388,13 @@ def cmd_open(args: argparse.Namespace) -> int:
 
     relpath: str | None = None
     canvas: str | None = None
+    ticket: str | None = None
     view = args.view or "note"
 
     if args.target:
-        if args.target.endswith(".canvas") and args.target in index.canvases:
+        if view == "ticket":
+            ticket = args.target.strip()
+        elif args.target.endswith(".canvas") and args.target in index.canvases:
             canvas = args.target
             view = "canvas"
         else:
@@ -390,6 +419,7 @@ def cmd_open(args: argparse.Namespace) -> int:
         relpath=relpath,
         view=view,
         canvas=canvas,
+        ticket=ticket,
         heading=args.heading,
     )
 
@@ -401,54 +431,69 @@ def cmd_open(args: argparse.Namespace) -> int:
 
     herdr_app = shutil.which("herdr-app")
     opened_in_app = False
-    if herdr_app and not args.no_window:
-        status_proc = subprocess.run(
-            [herdr_app, "status"],
-            capture_output=True,
-            text=True,
-            timeout=3,
-        )
-        if status_proc.returncode == 0:
-            # Check if a herdr-obsidian pane is already open in active tab
-            ls_proc = subprocess.run(
-                [herdr_app, "ls"],
+    if herdr_app:
+        if not args.no_window:
+            status_proc = subprocess.run(
+                [herdr_app, "status"],
                 capture_output=True,
                 text=True,
                 timeout=3,
             )
-            already_open = "herdr-obsidian" in (ls_proc.stdout or "")
-            if not already_open:
+            if status_proc.returncode == 0:
                 if args.placement == "tab":
                     subprocess.run(
                         [
                             herdr_app,
                             "do",
                             "tab.new",
-                            "--name",
-                            "Obsidian",
-                            "--mod",
-                            "herdr-obsidian",
+                            json.dumps({"name": "Obsidian", "mod": "herdr-obsidian"}),
                         ],
                         capture_output=True,
                         timeout=4,
                     )
                 else:
-                    subprocess.run(
+                    # Prefer revealing the layout's built-in knowledge stage (`col-knowledge`)
+                    show_proc = subprocess.run(
                         [
                             herdr_app,
                             "do",
-                            "pane.split",
-                            "--direction",
-                            "right",
-                            "--mod",
-                            "herdr-obsidian",
+                            "layout.show",
+                            json.dumps({"id": "col-knowledge"}),
                         ],
                         capture_output=True,
-                        timeout=4,
+                        text=True,
+                        timeout=3,
                     )
-            opened_in_app = True
+                    if show_proc.returncode == 0 and '"ok": true' in (show_proc.stdout or ""):
+                        subprocess.run(
+                            [
+                                herdr_app,
+                                "do",
+                                "layout.select",
+                                json.dumps({"stack": "knowledge-stack", "child": "obsidian"}),
+                            ],
+                            capture_output=True,
+                            timeout=3,
+                        )
+                    else:
+                        subprocess.run(
+                            [
+                                herdr_app,
+                                "do",
+                                "pane.split",
+                                json.dumps({"direction": "right", "mod": "herdr-obsidian"}),
+                            ],
+                            capture_output=True,
+                            timeout=4,
+                        )
+                opened_in_app = True
+        _trigger_herdr_app_refresh()
 
-    title = index.notes[relpath].title if relpath and relpath in index.notes else (canvas or view)
+    title = (
+        index.notes[relpath].title
+        if relpath and relpath in index.notes
+        else (ticket or canvas or view)
+    )
     if args.json:
         print(
             json.dumps(
@@ -459,6 +504,7 @@ def cmd_open(args: argparse.Namespace) -> int:
                     "title": title,
                     "view": view,
                     "canvas": canvas,
+                    "ticket": ticket,
                     "opened_in_app": opened_in_app,
                     "seq": spool["seq"],
                 },
@@ -466,7 +512,7 @@ def cmd_open(args: argparse.Namespace) -> int:
             )
         )
     else:
-        print(f"obsidian: {title} ({relpath or view}) — shown in Herdr Obsidian Vault viewer")
+        print(f"obsidian: {title} ({relpath or ticket or view}) — shown in Herdr Obsidian Vault viewer")
         print(f"[obsidian: {title}]")
     return 0
 
@@ -483,7 +529,8 @@ def cmd_read(args: argparse.Namespace) -> int:
     if not payload:
         return 1
     if args.sync:
-        write_spool_state(relpath=rel, view="note")
+        write_spool_state(vault_root=str(vault_root), relpath=rel, view="note")
+        _trigger_herdr_app_refresh()
     if args.json:
         print(json.dumps(payload, indent=2))
     else:
@@ -511,7 +558,8 @@ def cmd_write(args: argparse.Namespace) -> int:
     tmp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
     tmp.write_text(content, encoding="utf-8")
     os.replace(tmp, target)
-    write_spool_state(relpath=rel, view="note")
+    write_spool_state(vault_root=str(vault_root), relpath=rel, view="note")
+    _trigger_herdr_app_refresh()
     if args.json:
         print(json.dumps({"ok": True, "relpath": rel, "bytes": len(content.encode("utf-8"))}))
     else:
@@ -591,7 +639,12 @@ def cmd_ticket(args: argparse.Namespace) -> int:
     index = VaultIndex(vault_root)
     brief = resolve_ticket_brief(index, cwd, args.ticket)
     if args.sync:
-        write_spool_state(view="ticket")
+        write_spool_state(
+            vault_root=str(vault_root),
+            view="ticket",
+            ticket=str(brief.get("ticket_id") or args.ticket or ""),
+        )
+        _trigger_herdr_app_refresh()
     if args.json:
         print(json.dumps(brief, indent=2))
         return 0
@@ -928,20 +981,27 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    if not getattr(args, "subcommand", None):
-        return cmd_open(
-            argparse.Namespace(
-                cwd=args.cwd,
-                vault=args.vault,
-                target=None,
-                view="note",
-                placement="split",
-                heading=None,
-                no_window=False,
-                json=False,
+    try:
+        if not getattr(args, "subcommand", None):
+            return cmd_open(
+                argparse.Namespace(
+                    cwd=args.cwd,
+                    vault=args.vault,
+                    target=None,
+                    view="note",
+                    placement="split",
+                    heading=None,
+                    no_window=False,
+                    json=False,
+                )
             )
-        )
-    return int(args.func(args))
+        return int(args.func(args))
+    except BrokenPipeError:
+        try:
+            sys.stdout.close()
+        except OSError:
+            pass
+        return 0
 
 
 if __name__ == "__main__":

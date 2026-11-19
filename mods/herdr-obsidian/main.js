@@ -20,7 +20,10 @@ import {
   theme,
   settings,
   props,
+  home,
   appHome,
+  checking,
+  shared,
   watchFolder,
   nextCommand,
   notify,
@@ -124,47 +127,54 @@ function resolveWorkspaceTarget(lastTarget) {
   const allPanes = panes() || [];
   const f = focused() || {};
   const activeSpace = allSpaces.find((s) => s.active) || allSpaces[0] || null;
+  const spaceTabIds = new Set((activeSpace?.tabs || []).map((tb) => tb.id));
+  const spacePanes = allPanes.filter((pn) => spaceTabIds.has(pn.tab));
   const activeTab = f?.tab || activeSpace?.tabs?.find((tb) => tb.active)?.id || null;
   const focusedTermPane = f?.pane
-    ? allPanes.find((pn) => pn.pane === f.pane && pn.terminal)
+    ? spacePanes.find((pn) => pn.pane === f.pane && pn.terminal)
     : null;
   const tabTermPane = activeTab
-    ? allPanes.find((pn) => pn.tab === activeTab && pn.terminal && pn.cwd)
+    ? spacePanes.find((pn) => pn.tab === activeTab && pn.terminal && pn.cwd)
     : null;
-  const anyTermPaneWithCwd =
-    allPanes.find(
+  const spaceTermPaneWithCwd =
+    spacePanes.find(
       (pn) =>
         pn.terminal &&
         pn.cwd &&
         !/^\/home\/[^/]+\/?$/.test(pn.cwd) &&
         !/^\/Users\/[^/]+\/?$/.test(pn.cwd)
     ) ||
-    allPanes.find((pn) => pn.terminal && pn.cwd) ||
+    spacePanes.find((pn) => pn.terminal && pn.cwd) ||
     null;
+  const focusedInSpaceCwd = activeSpace && f?.space === activeSpace.id ? f.cwd : null;
+  const focusedInSpaceTerm = activeSpace && f?.space === activeSpace.id ? f.terminal : null;
 
   const on =
     p.on ||
     p.machine ||
     activeSpace?.machine ||
-    (f?.pane === null && f.terminal?.includes("/") ? f.terminal.split("/")[0] : null) ||
+    (f?.pane === null && focusedInSpaceTerm?.includes("/")
+      ? focusedInSpaceTerm.split("/")[0]
+      : null) ||
     null;
 
   const cwd =
     p.cwd ||
     p.folder ||
     focusedTermPane?.cwd ||
+    focusedInSpaceCwd ||
     tabTermPane?.cwd ||
-    f?.cwd ||
-    anyTermPaneWithCwd?.cwd ||
-    lastTarget?.cwd ||
+    spaceTermPaneWithCwd?.cwd ||
     activeSpace?.folder ||
+    lastTarget?.cwd ||
+    home() ||
     null;
 
   const rawPane =
     focusedTermPane?.terminal ||
-    f?.terminal ||
+    focusedInSpaceTerm ||
     tabTermPane?.terminal ||
-    anyTermPaneWithCwd?.terminal ||
+    spaceTermPaneWithCwd?.terminal ||
     lastTarget?.pane ||
     null;
   const pane = rawPane && String(rawPane).includes("/") ? String(rawPane).split("/")[1] : rawPane;
@@ -183,8 +193,10 @@ export default class ObsidianVault extends View {
     this.handle = cx.focus_handle();
     this.size = { width: 860, height: 680 };
     this.lastTarget = null;
+    this.lastLocalCwd = null;
     this.state = null;
     this.loading = false;
+    this.pendingRefresh = null;
     this.error = null;
 
     const p = props() || {};
@@ -198,6 +210,7 @@ export default class ObsidianVault extends View {
       this.lbDrag = null;
       this.lbShowSource = false;
       this.lbReady = false;
+      if (checking()) return;
       this.ensureLightboxAsset(cx);
       cx.timer.after(40, () => this.handle.focus());
       return;
@@ -212,6 +225,7 @@ export default class ObsidianVault extends View {
     this.typing = false;
 
     this.activeNotePath = p.note || p.file || null;
+    this.activeTicket = p.ticket || null;
     this.history = [];
     this.historyIndex = -1;
     this.openFolders = new Set(["00-Map-Of-Content (MOC)", "01-Product-Process-Architecture"]);
@@ -232,6 +246,7 @@ export default class ObsidianVault extends View {
     this.drag = null;
 
     this.lastSpoolSeq = 0;
+    this.lastNavSeq = 0;
     this.watchedSpool = null;
     this.watchedVault = null;
     this.cachedAssets = new Set();
@@ -269,14 +284,28 @@ export default class ObsidianVault extends View {
       }
     });
 
+    if (checking()) return;
+
+    this.consumeSharedNav();
+
     cx.spawn(async (cx) => {
       for (;;) {
-        const cmd = await nextCommand();
+        const cmd = await nextCommand().catch(() => null);
+        if (!cmd) break;
         if (cmd === "focus") {
           this.handle.focus();
           cx.notify();
         } else if (cmd === "refresh") {
-          this.refresh(cx);
+          this.followSync = true;
+          this.refresh(cx, { forceSync: true });
+        } else if (cmd.startsWith("view-")) {
+          const requestedView = cmd.slice("view-".length);
+          if (VIEWS.some((v) => v.id === requestedView)) {
+            this.viewMode = requestedView;
+          }
+          this.followSync = true;
+          this.refresh(cx, { forceSync: true });
+          cx.notify();
         } else if (cmd === "search") {
           this.searchInput.focus();
           cx.notify();
@@ -286,6 +315,33 @@ export default class ObsidianVault extends View {
 
     this.refresh(cx);
     cx.timer.every(4000, (cx) => this.refresh(cx, { background: true }));
+  }
+
+  consumeSharedNav() {
+    const nav = shared("obsidian.nav");
+    if (!nav || typeof nav !== "object") return false;
+    const seq = Number(nav.seq || 0);
+    if (!seq || seq <= this.lastNavSeq) return false;
+    this.lastNavSeq = seq;
+    this.followSync = true;
+    if (nav.view && VIEWS.some((v) => v.id === nav.view)) {
+      this.viewMode = nav.view;
+    }
+    if (nav.ticket) {
+      this.activeTicket = String(nav.ticket);
+    }
+    if (nav.target) {
+      const tgt = String(nav.target);
+      if (tgt.endsWith(".canvas")) {
+        this.activeCanvasPath = tgt;
+      } else if (nav.view !== "ticket") {
+        this.activeNotePath = tgt;
+      }
+    }
+    if (nav.cwd && !nav.on) {
+      this.lastLocalCwd = String(nav.cwd);
+    }
+    return true;
   }
 
   close(_cx) {
@@ -403,9 +459,24 @@ export default class ObsidianVault extends View {
   }
 
   refresh(cx, opts = {}) {
-    if (this.loading) return;
+    const navUpdated = this.consumeSharedNav();
+    if (navUpdated) {
+      cx.notify();
+    }
+    if (this.loading) {
+      this.pendingRefresh = {
+        background: Boolean(opts.background && (this.pendingRefresh?.background ?? true)),
+        forceSync: Boolean(opts.forceSync || navUpdated || this.pendingRefresh?.forceSync),
+      };
+      return;
+    }
     const target = resolveWorkspaceTarget(this.lastTarget);
-    if (target.cwd) this.lastTarget = target;
+    if (target.cwd) {
+      this.lastTarget = target;
+      if (!target.on) {
+        this.lastLocalCwd = target.cwd;
+      }
+    }
     if (!target.cwd) return;
 
     this.loading = true;
@@ -414,48 +485,90 @@ export default class ObsidianVault extends View {
     const availW = Math.max(360, Math.round((this.size?.width || 860) - sidebarW - inspectorW - 20));
     const availH = Math.max(260, Math.round((this.size?.height || 680) - 82));
 
-    const args = [
-      "app-state",
-      "--cwd",
-      target.cwd,
-      "--width",
-      String(availW),
-      "--height",
-      String(availH),
-      "--metric",
-      this.treemapMetric,
-      "--graph-mode",
-      this.graphMode,
-    ];
-    if (this.activeNotePath) args.push("--note", this.activeNotePath);
-    if (this.searchQuery) args.push("--query", this.searchQuery);
-    if (this.tagFilter) args.push("--tag", this.tagFilter);
-    if (this.levelFilter !== null) args.push("--level", String(this.levelFilter));
-    if (this.categoryFilter) args.push("--category", this.categoryFilter);
-    if (this.treemapZoomFolder) args.push("--zoom-folder", this.treemapZoomFolder);
-    if (this.activeCanvasPath) args.push("--canvas", this.activeCanvasPath);
-    if (target.pane) args.push("--pane", target.pane);
-    if (this.lastSpoolSeq > 0) args.push("--spool-seq", String(this.lastSpoolSeq));
-    if (this.followSync) args.push("--follow-sync");
+    const buildArgs = (cwdArg, paneArg) => {
+      const a = [
+        "app-state",
+        "--cwd",
+        cwdArg,
+        "--width",
+        String(availW),
+        "--height",
+        String(availH),
+        "--metric",
+        this.treemapMetric,
+        "--graph-mode",
+        this.graphMode,
+      ];
+      if (this.activeNotePath) a.push("--note", this.activeNotePath);
+      if (this.searchQuery) a.push("--query", this.searchQuery);
+      if (this.tagFilter) a.push("--tag", this.tagFilter);
+      if (this.levelFilter !== null) a.push("--level", String(this.levelFilter));
+      if (this.categoryFilter) a.push("--category", this.categoryFilter);
+      if (this.treemapZoomFolder) a.push("--zoom-folder", this.treemapZoomFolder);
+      if (this.activeCanvasPath) a.push("--canvas", this.activeCanvasPath);
+      if (this.activeTicket) a.push("--ticket", this.activeTicket);
+      if (paneArg) a.push("--pane", paneArg);
+      if (this.lastSpoolSeq > 0) a.push("--spool-seq", String(this.lastSpoolSeq));
+      if (this.followSync || opts.forceSync || navUpdated) a.push("--follow-sync");
+      return a;
+    };
 
     cx.spawn(async (cx) => {
       try {
-        const res = await exec("herdr-obsidian", args, {
+        let effectiveTarget = target;
+        let res = await exec("herdr-obsidian", buildArgs(target.cwd, target.pane), {
           cwd: target.cwd,
           on: target.on,
-        });
+        }).catch((e) => ({ code: 127, stdout: "", stderr: String(e) }));
+
+        // If the active space is on a remote peer where herdr-obsidian is not installed,
+        // transparently fall back to the local Obsidian Vault instead of failing.
+        if (res.code !== 0 && target.on) {
+          const fallbackCwd =
+            this.lastLocalCwd ||
+            (this.state?.vault_root ? String(this.state.vault_root) : null) ||
+            home();
+          if (fallbackCwd) {
+            effectiveTarget = {
+              ...target,
+              cwd: fallbackCwd,
+              on: null,
+              pane: null,
+            };
+            res = await exec("herdr-obsidian", buildArgs(fallbackCwd, null), {
+              cwd: fallbackCwd,
+              on: null,
+            }).catch((e) => ({ code: 1, stdout: "", stderr: String(e) }));
+          }
+        }
+
         if (res.code !== 0) {
           this.error = res.stderr?.trim() || "herdr-obsidian app-state failed";
           return;
         }
         const data = JSON.parse(res.stdout);
+        const prevVaultRoot = this.state?.vault_root;
         this.state = data;
         this.error = null;
 
-        if (this.followSync && data.spool_seq && data.spool_seq !== this.lastSpoolSeq) {
+        if (prevVaultRoot && data.vault_root && prevVaultRoot !== data.vault_root) {
+          this.activeNotePath = data.active_note?.relpath || null;
+          this.activeCanvasPath = data.canvas?.relpath || null;
+          this.history = this.activeNotePath ? [this.activeNotePath] : [];
+          this.historyIndex = this.activeNotePath ? 0 : -1;
+        }
+
+        if (
+          (this.followSync || opts.forceSync) &&
+          data.spool_seq &&
+          data.spool_seq !== this.lastSpoolSeq
+        ) {
           this.lastSpoolSeq = data.spool_seq;
           if (data.spool_view && VIEWS.some((v) => v.id === data.spool_view)) {
             this.viewMode = data.spool_view;
+          }
+          if (data.spool_ticket) {
+            this.activeTicket = data.spool_ticket;
           }
           if (data.active_note?.relpath) {
             this.activeNotePath = data.active_note.relpath;
@@ -471,7 +584,7 @@ export default class ObsidianVault extends View {
           this.historyIndex = 0;
         }
 
-        await this.ensureAllAssets(data, target, cx);
+        await this.ensureAllAssets(data, effectiveTarget, cx);
 
         if (this.editMode && data.active_note && this.editorNotePath !== data.active_note.relpath) {
           this.setupEditorForNote(data.active_note);
@@ -484,6 +597,11 @@ export default class ObsidianVault extends View {
       } finally {
         this.loading = false;
         cx.notify();
+        if (this.pendingRefresh) {
+          const nextOpts = this.pendingRefresh;
+          this.pendingRefresh = null;
+          this.refresh(cx, nextOpts);
+        }
       }
     });
   }
@@ -591,7 +709,6 @@ export default class ObsidianVault extends View {
     }
     this.activeNotePath = cleaned;
     this.viewMode = "note";
-    this.followSync = false;
     if (opts.edit) {
       this.editMode = true;
     } else if (this.editMode) {
